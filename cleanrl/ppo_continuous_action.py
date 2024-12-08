@@ -32,6 +32,8 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
+    human: bool = False
+    """human play"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
     upload_model: bool = False
@@ -40,7 +42,7 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = "HalfCheetah-v4"
+    env_id: str = 'MountainCarContinuous-v0' # "LunarLander-v2" # "HalfCheetah-v4"
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
@@ -84,13 +86,17 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
 
-def make_env(env_id, idx, capture_video, run_name, gamma):
+def make_env(env_id, idx, capture_video, human, run_name, gamma):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(env_id, render_mode="rgb_array") # , continuous=True)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        elif human:
+            env = gym.make(env_id, render_mode="human", continuous=True)
         else:
-            env = gym.make(env_id)
+            env = gym.make(env_id) #  , continuous=True)
+
+        print(env.action_space)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
@@ -175,7 +181,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, args.human, run_name, args.gamma) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
