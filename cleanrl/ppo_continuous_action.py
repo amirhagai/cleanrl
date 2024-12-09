@@ -84,6 +84,7 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+    MLP: bool = False
     input_size_attn: int = 8
     hidden_size: int = 2
     num_layers: int = 2
@@ -96,11 +97,15 @@ class TransformerLSTM(nn.Module):
         self.transformer = nn.MultiheadAttention(input_size_attn, num_heads)
         self.lstm = nn.LSTM(input_size_attn * 2, hidden_size, num_layers, batch_first=True)
 
-    def forward(self, x, hidden):
+
+    def forward(self, x):
         transformer_out = self.transformer(x, x, x, need_weights=False)
-        for i  in range(transformer_out[0].shape[0]):
-          lstm_out, hidden = self.lstm(torch.cat([transformer_out[0][:, i, :], x[:, i, :]]).reshape(1, 1, -1), hidden)
-        return lstm_out, hidden
+
+        hidden = (torch.zeros(args.num_layers, transformer_out[0].shape[0], args.hidden_size).to(device),
+                                torch.zeros(args.num_layers, transformer_out[0].shape[0], args.hidden_size).to(device))
+        for i  in range(transformer_out[0].shape[1]):
+          lstm_out, hidden = self.lstm(torch.cat([transformer_out[0][:, i, :], x[:, i, :]]).reshape(transformer_out[0].shape[0], 1, -1), hidden)
+        return lstm_out
 
 
 
@@ -148,18 +153,19 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0),
         )
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(obs_dim).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
-        )
-
-        self.actor_mean_2 = TransformerLSTM(input_size_attn=args.input_size_attn,
-                                             hidden_size=args.hidden_size,
-                                               num_layers=args.num_layers,
-                                                 num_heads=args.num_heads)
+        if args.MLP:
+            self.actor_mean = nn.Sequential(
+                layer_init(nn.Linear(np.array(obs_dim).prod(), 64)),
+                nn.Tanh(),
+                layer_init(nn.Linear(64, 64)),
+                nn.Tanh(),
+                layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+            )
+        else:
+            self.actor_mean = TransformerLSTM(input_size_attn=args.input_size_attn,
+                                                hidden_size=args.hidden_size,
+                                                num_layers=args.num_layers,
+                                                    num_heads=args.num_heads)
 
         
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
@@ -168,10 +174,11 @@ class Agent(nn.Module):
         return self.critic(x)
 
     def get_action_and_value(self, x, action=None):
-        action_mean = self.actor_mean(x)
-        self.actor_mean_2(x.reshape(1, args.num_obs, -1), 
-                          (torch.zeros(args.num_layers, 1, args.hidden_size).to(x.device),
-                            torch.zeros(args.num_layers, 1, args.hidden_size).to(x.device)))
+        if args.MLP:
+            action_mean = self.actor_mean(x)
+        else:
+            action_mean = self.actor_mean(x.reshape(x.shape[0], args.num_obs, -1))
+            action_mean = action_mean.reshape(x.shape[0], -1)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
