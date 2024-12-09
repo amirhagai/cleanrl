@@ -12,7 +12,7 @@ import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
-
+from gymnasium.wrappers import FrameStack
 
 @dataclass
 class Args:
@@ -30,7 +30,7 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = False
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     human: bool = False
     """human play"""
@@ -42,7 +42,7 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = 'MountainCarContinuous-v0' # "LunarLander-v2" # "HalfCheetah-v4"
+    env_id: str = "LunarLander-v2" # "HalfCheetah-v4", 'MountainCarContinuous-v0'
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
@@ -60,7 +60,7 @@ class Args:
     """the lambda for the general advantage estimation"""
     num_minibatches: int = 32
     """the number of mini-batches"""
-    update_epochs: int = 10
+    update_epochs: int = 25
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
@@ -84,17 +84,39 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+    input_size_attn: int = 8
+    hidden_size: int = 2
+    num_layers: int = 2
+    num_heads: int = 4
+    num_obs: int = 4
+
+class TransformerLSTM(nn.Module):
+    def __init__(self, input_size_attn, hidden_size, num_layers, num_heads):
+        super().__init__()
+        self.transformer = nn.MultiheadAttention(input_size_attn, num_heads)
+        self.lstm = nn.LSTM(input_size_attn * 2, hidden_size, num_layers, batch_first=True)
+
+    def forward(self, x, hidden):
+        transformer_out = self.transformer(x, x, x, need_weights=False)
+        for i  in range(transformer_out[0].shape[0]):
+          lstm_out, hidden = self.lstm(torch.cat([transformer_out[0][:, i, :], x[:, i, :]]).reshape(1, 1, -1), hidden)
+        return lstm_out, hidden
+
+
+
 
 
 def make_env(env_id, idx, capture_video, human, run_name, gamma):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array") # , continuous=True)
+            env = gym.make(env_id, render_mode="rgb_array", continuous=True)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         elif human:
             env = gym.make(env_id, render_mode="human", continuous=True)
         else:
-            env = gym.make(env_id) #  , continuous=True)
+            env = gym.make(env_id, continuous=True)
+
+        env = FrameStack(env, args.num_obs)
 
         print(env.action_space)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
@@ -118,20 +140,28 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
+        obs_dim = np.array(envs.single_observation_space.shape).prod() # two obs at a time
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            layer_init(nn.Linear(np.array(obs_dim).prod(), 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            layer_init(nn.Linear(np.array(obs_dim).prod(), 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
         )
+
+        self.actor_mean_2 = TransformerLSTM(input_size_attn=args.input_size_attn,
+                                             hidden_size=args.hidden_size,
+                                               num_layers=args.num_layers,
+                                                 num_heads=args.num_heads)
+
+        
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
     def get_value(self, x):
@@ -139,6 +169,9 @@ class Agent(nn.Module):
 
     def get_action_and_value(self, x, action=None):
         action_mean = self.actor_mean(x)
+        self.actor_mean_2(x.reshape(1, args.num_obs, -1), 
+                          (torch.zeros(args.num_layers, 1, args.hidden_size).to(x.device),
+                            torch.zeros(args.num_layers, 1, args.hidden_size).to(x.device)))
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
@@ -189,7 +222,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
+    obs = torch.zeros((args.num_steps, args.num_envs, envs.single_observation_space.shape[0])).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -215,14 +248,14 @@ if __name__ == "__main__":
             obs[step] = next_obs
             dones[step] = next_done
 
-            # ALGO LOGIC: action logic
+            # Action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                action, logprob, _, value = agent.get_action_and_value(obs[step])
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
-            # TRY NOT TO MODIFY: execute the game and log data.
+            # Execute environment step
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
