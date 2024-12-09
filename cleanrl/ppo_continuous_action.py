@@ -44,7 +44,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "LunarLander-v2" # "HalfCheetah-v4", 'MountainCarContinuous-v0'
     """the id of the environment"""
-    total_timesteps: int = 100000000
+    total_timesteps: int = 1000000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -82,7 +82,7 @@ class Args:
     """the batch size (computed in runtime)"""
     minibatch_size: int = 0
     """the mini-batch size (computed in runtime)"""
-    num_iterations: int = 0
+    num_iterations: int = 10
     """the number of iterations (computed in runtime)"""
     MLP: bool = False
     input_size_attn: int = 8
@@ -382,24 +382,24 @@ if __name__ == "__main__":
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-    if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-        torch.save(agent.state_dict(), model_path)
-        print(f"model saved to {model_path}")
-        from cleanrl_utils.evals.ppo_eval import evaluate
+        if args.save_model:
+            model_path = f"runs/{run_name}/{args.exp_name}_{iteration}.cleanrl_model"
+            torch.save(agent.state_dict(), model_path)
+            print(f"model saved to {model_path}")
+            from cleanrl_utils.evals.ppo_eval import evaluate
 
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=Agent,
-            device=device,
-            gamma=args.gamma,
-        )
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
+            episodic_returns = evaluate(
+                model_path,
+                make_env,
+                args.env_id,
+                eval_episodes=10,
+                run_name=f"{run_name}-eval",
+                Model=Agent,
+                device=device,
+                gamma=args.gamma,
+            )
+            for idx, episodic_return in enumerate(episodic_returns):
+                writer.add_scalar("eval/episodic_return", episodic_return, idx)
 
         if args.upload_model:
             from cleanrl_utils.huggingface import push_to_hub
