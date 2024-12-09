@@ -30,11 +30,11 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = True
+    capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     human: bool = False
     """human play"""
-    save_model: bool = False
+    save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
@@ -44,7 +44,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "LunarLander-v2" # "HalfCheetah-v4", 'MountainCarContinuous-v0'
     """the id of the environment"""
-    total_timesteps: int = 1000000
+    total_timesteps: int = 100000000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -119,7 +119,12 @@ def make_env(env_id, idx, capture_video, human, run_name, gamma):
         elif human:
             env = gym.make(env_id, render_mode="human", continuous=True)
         else:
-            env = gym.make(env_id, continuous=True)
+            if env_id == "LunarLander-v2":
+                gravity = np.random.uniform(-11.9, -0.1)
+                print(f"gravity is - {gravity}")
+                env = gym.make(env_id, continuous=True, gravity=gravity)
+            else:
+                env = gym.make(env_id, continuous=True)
 
         env = FrameStack(env, args.num_obs)
 
@@ -244,6 +249,14 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
 
     for iteration in range(1, args.num_iterations + 1):
+        envs = gym.vector.SyncVectorEnv(
+        [make_env(args.env_id, i, args.capture_video, args.human, run_name, args.gamma) for i in range(args.num_envs)]
+        )
+        global_step = 0
+        start_time = time.time()
+        next_obs, _ = envs.reset(seed=args.seed)
+        next_obs = torch.Tensor(next_obs).to(device)
+        next_done = torch.zeros(args.num_envs).to(device)
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
