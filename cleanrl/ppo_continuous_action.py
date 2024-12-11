@@ -44,13 +44,13 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "LunarLander-v2" # "HalfCheetah-v4", 'MountainCarContinuous-v0'
     """the id of the environment"""
-    total_timesteps: int = 1000000
+    total_timesteps: int = 3000000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 4
     """the number of parallel game environments"""
-    num_steps: int = 2048
+    num_steps: int = 4096
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -60,7 +60,7 @@ class Args:
     """the lambda for the general advantage estimation"""
     num_minibatches: int = 32
     """the number of mini-batches"""
-    update_epochs: int = 25
+    update_epochs: int = 20
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
@@ -111,7 +111,7 @@ class TransformerLSTM(nn.Module):
 
 
 
-def make_env(env_id, idx, capture_video, human, run_name, gamma):
+def make_env(env_id, idx, capture_video, run_name, gamma, human=False, gravity=-10):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array", continuous=True)
@@ -120,15 +120,11 @@ def make_env(env_id, idx, capture_video, human, run_name, gamma):
             env = gym.make(env_id, render_mode="human", continuous=True)
         else:
             if env_id == "LunarLander-v2":
-                gravity = np.random.uniform(-11.9, -0.1)
-                print(f"gravity is - {gravity}")
                 env = gym.make(env_id, continuous=True, gravity=gravity)
             else:
                 env = gym.make(env_id, continuous=True)
 
         env = FrameStack(env, args.num_obs)
-
-        print(env.action_space)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
@@ -226,7 +222,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, args.human, run_name, args.gamma) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, human=args.human) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -249,8 +245,10 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
 
     for iteration in range(1, args.num_iterations + 1):
+        gravity = np.random.uniform(-11.9, -0.1)
+        print(f"gravity is - {gravity}")
         envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, args.human, run_name, args.gamma) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, human=args.human, gravity=gravity) for i in range(args.num_envs)]
         )
         global_step = 0
         start_time = time.time()
@@ -278,6 +276,14 @@ if __name__ == "__main__":
             # Execute environment step
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
             next_done = np.logical_or(terminations, truncations)
+            for i in range(args.num_envs):
+                if terminations[i]:
+                    print(f"termination env {i}\n")
+                    gravity = np.random.uniform(-11.9, -0.1)
+                    print(f"gravity is - {gravity}")
+                    env = gym.vector.SyncVectorEnv([make_env(args.env_id, i, args.capture_video, run_name, args.gamma, human=args.human, gravity=gravity)])
+                    next_obs[i], _ = env.reset(seed=args.seed)
+                    envs.envs[i] = env.envs[0]                
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
@@ -387,12 +393,12 @@ if __name__ == "__main__":
             torch.save(agent.state_dict(), model_path)
             print(f"model saved to {model_path}")
             from cleanrl_utils.evals.ppo_eval import evaluate
-
+            print("start evaluation\n\n\n")
             episodic_returns = evaluate(
                 model_path,
                 make_env,
                 args.env_id,
-                eval_episodes=10,
+                eval_episodes=20,
                 run_name=f"{run_name}-eval",
                 Model=Agent,
                 device=device,
